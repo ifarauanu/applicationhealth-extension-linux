@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -33,6 +35,7 @@ const (
 
 var (
 	timeOfLastAppHealthLog = time.Time{}
+	heartbeatFilePath      string
 )
 
 func (p HealthStatus) GetStatusType() StatusType {
@@ -267,5 +270,27 @@ func LogHeartBeat() {
 	if time.Since(timeOfLastAppHealthLog) >= RecordAppHealthHeartBeatIntervalInMinutes*time.Minute {
 		timeOfLastAppHealthLog = time.Now()
 		telemetry.SendEvent(telemetry.InfoEvent, telemetry.ReportHeatBeatTask, "AppHealthExtension is running")
+		writeHeartbeatFile()
 	}
+}
+
+// writeHeartbeatFile writes the current timestamp to the heartbeat file for process health detection.
+func writeHeartbeatFile() {
+	if heartbeatFilePath == "" {
+		return
+	}
+	if err := os.WriteFile(heartbeatFilePath, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0644); err != nil {
+		slog.Warn("Failed to write heartbeat file", "error", err, "path", heartbeatFilePath)
+	}
+}
+
+// GetHeartbeatFileLastWriteTime returns the last modification time of the heartbeat file
+// in the specified log folder.
+func GetHeartbeatFileLastWriteTime(logFolder string) (time.Time, error) {
+	filePath := filepath.Join(logFolder, AppHealthHeartbeatFileName)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }

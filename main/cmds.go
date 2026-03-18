@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,20 @@ var (
 	errTerminated = errors.New("Application health process terminated")
 )
 
+// processDetectorFunc checks if another AppHealth extension process is running.
+// Returns (isRunning, pid). Injectable for testing.
+var processDetectorFunc = isAppHealthProcessRunning
+
+// heartbeatCheckerFunc checks the heartbeat file last write time.
+// Injectable for testing.
+var heartbeatCheckerFunc = GetHeartbeatFileLastWriteTime
+
+// exitProcessFunc exits the process with the given code. Injectable for testing.
+var exitProcessFunc = os.Exit
+
+// getHandlerEnvFunc retrieves the handler environment. Injectable for testing.
+var getHandlerEnvFunc = handlerenv.GetHandlerEnviroment
+
 func enablePre(lg *slog.Logger, seqNum uint) error {
 	// exit if this sequence number (a snapshot of the configuration) is already
 	// processed. if not, save this sequence number before proceeding.
@@ -85,10 +101,22 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get current sequence number")
 	}
+
+	// Perform idempotency check for same sequence number
+	if seqNum == mrSeqNum && mrSeqNum != 0 {
+		if shouldExit := checkIdempotency(lg, seqNum); shouldExit {
+			exitProcessFunc(0)
+			return nil
+		}
+	}
+
 	// If the most recent sequence number is greater than or equal to the requested sequence number,
 	// then the script has already been run and we should exit.
 	if mrSeqNum != 0 && seqNum < mrSeqNum {
 		lg.Info("the script configuration has already been processed, will not run again")
+		telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Current sequence number, %d, is not greater than the sequence number of the most recently executed configuration (%d). PID %d initiating graceful shutdown...",
+				seqNum, mrSeqNum, os.Getpid()))
 		return errors.Errorf("most recent sequence number %d is greater than the requested sequence number %d", mrSeqNum, seqNum)
 	}
 
@@ -99,12 +127,130 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	return nil
 }
 
+// checkIdempotency checks if another AppHealth process is already running with the same
+// sequence number and is responsive. Returns true if the current process should exit.
+func checkIdempotency(lg *slog.Logger, seqNum uint) bool {
+	// Get handler environment for heartbeat file access
+	hEnv, err := getHandlerEnvFunc()
+	if err != nil {
+		lg.Warn("Failed to get handler environment for idempotency check, proceeding normally", "error", err)
+		return false
+	}
+
+	// Check heartbeat file freshness BEFORE writing any logs
+	isExistingProcessResponsive := false
+	heartbeatTime, err := heartbeatCheckerFunc(hEnv.LogFolder)
+	if err == nil {
+		timeSinceLastWrite := time.Since(heartbeatTime)
+		if timeSinceLastWrite.Minutes() < float64(AppHealthLogFileStaleThresholdInMinutes) {
+			isExistingProcessResponsive = true
+			telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Existing process heartbeat file was fresh at startup. Last update: %s UTC.",
+					heartbeatTime.UTC().Format(time.RFC3339Nano)))
+		} else {
+			telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Existing process heartbeat file was stale at startup. Last update: %s UTC, Threshold: %d minutes. Process may be stuck.",
+					heartbeatTime.UTC().Format(time.RFC3339Nano), AppHealthLogFileStaleThresholdInMinutes))
+		}
+	} else {
+		telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Existing process heartbeat file was stale at startup. Last update: %s UTC, Threshold: %d minutes. Process may be stuck.",
+				time.Time{}.UTC().Format(time.RFC3339Nano), AppHealthLogFileStaleThresholdInMinutes))
+	}
+
+	// Check if another AppHealth process is running
+	isRunning, _ := processDetectorFunc(lg)
+
+	if isRunning && isExistingProcessResponsive {
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Another instance of AppHealthExtension is already running with the same sequence number (%d) and is responsive. PID %d exiting to maintain idempotency.",
+				seqNum, os.Getpid()))
+		return true
+	}
+
+	if isRunning && !isExistingProcessResponsive {
+		telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Another instance of AppHealthExtension exists with the same sequence number (%d) but appears unresponsive (heartbeat file stale). PID %d taking over execution.",
+				seqNum, os.Getpid()))
+	}
+
+	return false
+}
+
+// isAppHealthProcessRunning checks if another AppHealth extension process is running
+// by scanning /proc for processes with the same binary name.
+func isAppHealthProcessRunning(lg *slog.Logger) (bool, int) {
+	myPid := os.Getpid()
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		lg.Warn("Failed to read /proc directory", "error", err)
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("IsHandlerStillExecuting: Process Name='applicationhealth-extension', result=False"))
+		return false, 0
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == myPid {
+			continue
+		}
+
+		cmdlineBytes, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+
+		cmdline := string(cmdlineBytes)
+		if (strings.Contains(cmdline, AppHealthBinaryNameAmd64) || strings.Contains(cmdline, AppHealthBinaryNameArm64)) &&
+			strings.Contains(cmdline, "enable") {
+			telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("IsHandlerStillExecuting: Process Name='applicationhealth-extension', PID=%d, result=True", pid))
+			return true, pid
+		}
+	}
+
+	telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+		fmt.Sprintf("IsHandlerStillExecuting: Process Name='applicationhealth-extension', result=False"))
+	return false, 0
+}
+
+// checkAndHandleStaleSequenceNumber checks if the current sequence number is stale
+// (another process started with a higher sequence number). If stale, it kills child
+// processes and returns true to signal the caller to exit gracefully.
+func checkAndHandleStaleSequenceNumber(lg *slog.Logger, seqNum uint) bool {
+	currentMrSeq, err := seqnoManager.GetCurrentSequenceNumber(lg, fullName, "")
+	if err != nil {
+		return false
+	}
+	if currentMrSeq > seqNum {
+		telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Current sequence number, %d, is not greater than the sequence number of the most recently executed configuration (%d). PID %d initiating graceful shutdown...",
+				seqNum, currentMrSeq, os.Getpid()))
+		// Kill VMWatch child process before exiting
+		err = killVMWatch(lg, vmWatchCommand)
+		if err != nil {
+			lg.Error("Error killing VMWatch during graceful shutdown", "error", err)
+		} else {
+			lg.Info("Successfully cleaned up child processes before exiting due to stale sequence number")
+		}
+		return true
+	}
+	return false
+}
+
 func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (string, error) {
 	// parse the extension handler settings (not available prior to 'enable')
 	cfg, err := parseAndValidateSettings(lg, h.ConfigFolder)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to get configuration")
 	}
+
+	// Set heartbeat file path for LogHeartBeat to use
+	heartbeatFilePath = filepath.Join(h.LogFolder, AppHealthHeartbeatFileName)
 
 	telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask, "Successfully parsed and validated settings")
 	telemetry.SendEvent(telemetry.VerboseEvent, telemetry.AppHealthTask, fmt.Sprintf("HandlerSettings = %s", cfg))
@@ -163,6 +309,12 @@ func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (str
 		// Since we only log health state changes, it is possible there will be no recent logs for app health extension.
 		// As an indication that the extension is running, we log app health extension heart beat at a set interval.
 		LogHeartBeat()
+
+		// Check if sequence number is stale (another process started with higher seq)
+		if checkAndHandleStaleSequenceNumber(lg, seqNum) {
+			telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask, "Shutting down AppHealth Extension due to stale sequence number")
+			return "", errTerminated
+		}
 
 		startTime := time.Now()
 		probeResponse, err := probe.evaluate(lg)

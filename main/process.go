@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,20 +16,21 @@ import (
 
 // Package-level function variables to allow mocking in tests
 var (
-	findExistingProcess   = findExistingProcessImpl
-	getLogFileLastModTime = getLogFileLastModTimeImpl
-	getHandlerEnvironment = handlerenv.GetHandlerEnviroment
+	findExistingProcesses = findExistingProcessesImpl
+	getLogFileLastModTime  = getLogFileLastModTimeImpl
+	getHandlerEnvironment  = handlerenv.GetHandlerEnviroment
 )
 
-// findExistingProcessImpl scans /proc to find another running instance of the
+// findExistingProcessesImpl scans /proc to find all other running instances of the
 // Application Health Extension binary (excluding the current process).
-// Returns the PID of the existing process, or 0 if none found.
-func findExistingProcessImpl() (int, error) {
+// Returns a slice of PIDs of existing processes (empty if none found).
+func findExistingProcessesImpl() ([]int, error) {
 	myPid := os.Getpid()
+	var pids []int
 
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0, fmt.Errorf("failed to read /proc: %w", err)
+		return nil, fmt.Errorf("failed to read /proc: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -56,11 +58,11 @@ func findExistingProcessImpl() (int, error) {
 		procName := filepath.Base(parts[0])
 		// Check if the process is an AHE binary running with "enable" argument
 		if (procName == AppHealthBinaryNameAmd64 || procName == AppHealthBinaryNameArm64) && parts[1] == "enable" {
-			return pid, nil
+			pids = append(pids, pid)
 		}
 	}
 
-	return 0, nil
+	return pids, nil
 }
 
 // getLogFileLastModTimeImpl returns the modification time of the handler log file
@@ -88,6 +90,18 @@ func isLogFileFresh(logFolder string) (bool, time.Time) {
 
 	threshold := time.Duration(AppHealthLogFileStaleThresholdInMinutes) * time.Minute
 	return time.Since(lastModTime) < threshold, lastModTime
+}
+
+// killProcesses sends SIGTERM to all specified processes and waits for each to exit.
+// Logs a warning for any process that cannot be killed but continues with the rest.
+func killProcesses(lg *slog.Logger, pids []int) {
+	for _, pid := range pids {
+		if err := killProcess(pid); err != nil {
+			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Failed to terminate existing process %d: %v", pid, err),
+				"pid", pid, "error", err)
+		}
+	}
 }
 
 // killProcess sends SIGTERM to the specified process and waits (bounded) for it

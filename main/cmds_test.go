@@ -41,11 +41,11 @@ func Test_commands_shouldReportStatus(t *testing.T) {
 // saveAndRestoreIdempotencyMocks saves original function variables and restores
 // them after the test to prevent test pollution.
 func saveAndRestoreIdempotencyMocks(t *testing.T) {
-	origFindExistingProcess := findExistingProcess
+	origFindExistingProcesses := findExistingProcesses
 	origGetLogFileLastModTime := getLogFileLastModTime
 	origGetHandlerEnvironment := getHandlerEnvironment
 	t.Cleanup(func() {
-		findExistingProcess = origFindExistingProcess
+		findExistingProcesses = origFindExistingProcesses
 		getLogFileLastModTime = origGetLogFileLastModTime
 		getHandlerEnvironment = origGetHandlerEnvironment
 	})
@@ -54,7 +54,7 @@ func saveAndRestoreIdempotencyMocks(t *testing.T) {
 // mockNoExistingProcess sets up mocks so idempotency check finds no existing process
 func mockNoExistingProcess(t *testing.T) {
 	saveAndRestoreIdempotencyMocks(t)
-	findExistingProcess = func() (int, error) { return 0, nil }
+	findExistingProcesses = func() ([]int, error) { return nil, nil }
 	getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
 		return nil, fmt.Errorf("not available in test")
 	}
@@ -135,8 +135,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
 			return time.Now().Add(-1 * time.Minute), nil // 1 minute ago = fresh
 		}
-		findExistingProcess = func() (int, error) {
-			return 1234, nil // existing process found
+		findExistingProcesses = func() ([]int, error) {
+			return []int{1234}, nil // existing process found
 		}
 
 		err := enablePre(logger, 20) // same sequence number
@@ -156,8 +156,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
 			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago = stale (threshold is 10)
 		}
-		findExistingProcess = func() (int, error) {
-			return 5678, nil // existing process found
+		findExistingProcesses = func() ([]int, error) {
+			return []int{5678}, nil // existing process found
 		}
 
 		err := enablePre(logger, 21) // same sequence number
@@ -172,20 +172,13 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(36), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
-		callCount := 0
-		findExistingProcess = func() (int, error) {
-			callCount++
-			if callCount == 1 {
-				// First call is from checkIdempotency — different seq, returns early
-				return 0, nil
-			}
-			// Second call is from the new-seq-kill block in enablePre
-			return 5492, nil
+		// Single call — PIDs are discovered once and reused for both idempotency and kill
+		findExistingProcesses = func() ([]int, error) {
+			return []int{5492}, nil
 		}
 
 		err := enablePre(logger, 37)
 		assert.NoError(t, err, "new process with higher seq should continue")
-		assert.Equal(t, 2, callCount, "findExistingProcess should be called twice: once for idempotency, once for kill")
 	})
 
 	// Test Case 4: New seq + existing running process → should kill old and continue
@@ -197,9 +190,9 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
 		findProcessCalled := false
-		findExistingProcess = func() (int, error) {
+		findExistingProcesses = func() ([]int, error) {
 			findProcessCalled = true
-			return 4321, nil // existing process from old seq
+			return []int{4321}, nil // existing process from old seq
 		}
 
 		err := enablePre(logger, 11) // new seq > mrSeq
@@ -243,8 +236,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
 			return time.Now().Add(-20 * time.Minute), nil // stale
 		}
-		findExistingProcess = func() (int, error) {
-			return 0, nil // no existing process
+		findExistingProcesses = func() ([]int, error) {
+			return nil, nil // no existing process
 		}
 
 		err := enablePre(logger, 10)
@@ -266,21 +259,15 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		assert.NoError(t, err, "should continue gracefully when handler env is unavailable")
 	})
 
-	// Edge case: findExistingProcess fails → should continue gracefully
+	// Edge case: findExistingProcesses fails → should continue gracefully
 	t.Run("SameSeq_ProcessDiscoveryError_ShouldContinue", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(15), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now(), nil
-		}
-		findExistingProcess = func() (int, error) {
-			return 0, fmt.Errorf("proc filesystem error")
+		findExistingProcesses = func() ([]int, error) {
+			return nil, fmt.Errorf("proc filesystem error")
 		}
 
 		err := enablePre(logger, 15)
@@ -300,8 +287,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
 			return time.Time{}, fmt.Errorf("no log files found")
 		}
-		findExistingProcess = func() (int, error) {
-			return 9999, nil // process exists
+		findExistingProcesses = func() ([]int, error) {
+			return []int{9999}, nil // process exists
 		}
 
 		err := enablePre(logger, 10)

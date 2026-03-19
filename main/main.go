@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -74,6 +75,12 @@ func main() {
 	if cmd.pre != nil {
 		logger.Info("pre-check")
 		if err := cmd.pre(logger, seqNum); err != nil {
+			// Idempotent exit: healthy process already running, write success status and exit cleanly
+			if errors.Is(err, errIdempotentExit) {
+				telemetry.SendEvent(telemetry.InfoEvent, telemetry.MainTask, "Idempotent exit: extension already running with current configuration")
+				reportStatus(logger, hEnv, seqNum, StatusSuccess, cmd, "Extension already running")
+				os.Exit(0)
+			}
 			telemetry.SendEvent(telemetry.ErrorEvent, telemetry.MainTask, "pre-check failed", "error", err.Error())
 			os.Exit(cmd.failExitCode)
 		}

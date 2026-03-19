@@ -44,12 +44,10 @@ func saveAndRestoreIdempotencyMocks(t *testing.T) {
 	origFindExistingProcess := findExistingProcess
 	origGetLogFileLastModTime := getLogFileLastModTime
 	origGetHandlerEnvironment := getHandlerEnvironment
-	origOsExit := osExit
 	t.Cleanup(func() {
 		findExistingProcess = origFindExistingProcess
 		getLogFileLastModTime = origGetLogFileLastModTime
 		getHandlerEnvironment = origGetHandlerEnvironment
-		osExit = origOsExit
 	})
 }
 
@@ -60,7 +58,6 @@ func mockNoExistingProcess(t *testing.T) {
 	getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
 		return nil, fmt.Errorf("not available in test")
 	}
-	osExit = func(code int) { t.Fatalf("unexpected os.Exit(%d)", code) }
 }
 
 func Test_enablePre(t *testing.T) {
@@ -126,15 +123,11 @@ func Test_enablePre_Idempotency(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockSeqNumManager := seqno.NewMockSequenceNumberManager(ctrl)
 
-	// Test Case 1: Same seq + healthy process → new process exits
-	t.Run("SameSeq_HealthyProcess_ShouldExit", func(t *testing.T) {
+	// Test Case 1: Same seq + healthy process → returns errIdempotentExit
+	t.Run("SameSeq_HealthyProcess_ShouldReturnIdempotentExit", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(20), nil)
-
-		logDir := t.TempDir()
-		// Create a fresh log file (recently modified)
-		os.WriteFile(logDir+"/handler.log", []byte("heartbeat"), 0644)
 
 		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
 			return &handlerenv.HandlerEnvironment{}, nil
@@ -146,17 +139,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return 1234, nil // existing process found
 		}
 
-		exitCalled := false
-		exitCode := -1
-		osExit = func(code int) {
-			exitCalled = true
-			exitCode = code
-		}
-
 		err := enablePre(logger, 20) // same sequence number
-		assert.NoError(t, err)
-		assert.True(t, exitCalled, "os.Exit should have been called for idempotent exit")
-		assert.Equal(t, 0, exitCode, "should exit with code 0")
+		assert.ErrorIs(t, err, errIdempotentExit, "should return errIdempotentExit when healthy process exists")
 	})
 
 	// Test Case 2: Same seq + unhealthy process → new process takes over
@@ -170,82 +154,80 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return &handlerenv.HandlerEnvironment{}, nil
 		}
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-10 * time.Minute), nil // 10 minutes ago = stale
+			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago = stale (threshold is 10)
 		}
 		findExistingProcess = func() (int, error) {
 			return 5678, nil // existing process found
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 21) // same sequence number
-		assert.NoError(t, err)
-		assert.False(t, exitCalled, "os.Exit should NOT have been called - new process should take over")
+		assert.NoError(t, err, "should take over unhealthy process")
 	})
 
-	// Test Case 3: Lower seq (existing) + healthy process → new process continues
-	t.Run("HigherSeq_HealthyExistingProcess_ShouldContinue", func(t *testing.T) {
+	// Test Case 3: Higher seq than existing → new process should continue and kill old
+	t.Run("HigherSeq_ExistingProcess_ShouldKillAndContinue", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
-		// mrSeqNum = 36, seqNum = 37 → seqNum > mrSeqNum, different seq
+		// mrSeqNum = 36, seqNum = 37 → seqNum > mrSeqNum
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(36), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-1 * time.Minute), nil
-		}
+		callCount := 0
 		findExistingProcess = func() (int, error) {
+			callCount++
+			if callCount == 1 {
+				// First call is from checkIdempotency — different seq, returns early
+				return 0, nil
+			}
+			// Second call is from the new-seq-kill block in enablePre
 			return 5492, nil
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 37)
-		assert.NoError(t, err)
-		assert.False(t, exitCalled, "new process with higher seq should continue")
+		assert.NoError(t, err, "new process with higher seq should continue")
+		assert.Equal(t, 2, callCount, "findExistingProcess should be called twice: once for idempotency, once for kill")
 	})
 
-	// Test Case 5: Higher seq (existing) + healthy process → new process exits
+	// Test Case 4: New seq + existing running process → should kill old and continue
+	t.Run("HigherSeq_RunningProcess_ShouldKillOld", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		// mrSeqNum = 10, seqNum = 11 → new config
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		findProcessCalled := false
+		findExistingProcess = func() (int, error) {
+			findProcessCalled = true
+			return 4321, nil // existing process from old seq
+		}
+
+		err := enablePre(logger, 11) // new seq > mrSeq
+		assert.NoError(t, err, "should succeed with new sequence number")
+		assert.True(t, findProcessCalled, "should have checked for existing process to kill")
+	})
+
+	// Test Case 5: Lower seq (existing) + healthy process → new process exits with error
 	t.Run("LowerSeq_HealthyExistingProcess_ShouldFail", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
 		// mrSeqNum = 26, seqNum = 25 → seqNum < mrSeqNum
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(26), nil)
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 25)
 		assert.Error(t, err, "lower sequence number should fail")
-		assert.False(t, exitCalled, "should not call os.Exit, should return error")
+		assert.NotErrorIs(t, err, errIdempotentExit, "should not be idempotent exit, should be regular error")
 	})
 
-	// Test Case 6: Higher seq (existing) + unhealthy process → new process exits (seq takes precedence)
+	// Test Case 6: Lower seq (existing) + unhealthy process → still fails (seq takes precedence)
 	t.Run("LowerSeq_UnhealthyExistingProcess_ShouldFail", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
 		// mrSeqNum = 26, seqNum = 25 → seqNum < mrSeqNum
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(26), nil)
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 25)
 		assert.Error(t, err, "lower sequence number should fail regardless of health")
-		assert.False(t, exitCalled)
 	})
 
 	// Test Case 7: No existing AHE process → normal startup
@@ -265,14 +247,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return 0, nil // no existing process
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 10)
-		assert.NoError(t, err)
-		assert.False(t, exitCalled, "should not exit when no existing process")
+		assert.NoError(t, err, "should not exit when no existing process")
 	})
 
 	// Edge case: getHandlerEnvironment fails → should continue gracefully
@@ -286,14 +262,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return nil, fmt.Errorf("handler env not available")
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 15)
 		assert.NoError(t, err, "should continue gracefully when handler env is unavailable")
-		assert.False(t, exitCalled)
 	})
 
 	// Edge case: findExistingProcess fails → should continue gracefully
@@ -313,14 +283,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return 0, fmt.Errorf("proc filesystem error")
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 15)
 		assert.NoError(t, err, "should continue gracefully on process discovery error")
-		assert.False(t, exitCalled)
 	})
 
 	// Edge case: No log files (fresh install) → should continue
@@ -340,14 +304,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 			return 9999, nil // process exists
 		}
 
-		exitCalled := false
-		osExit = func(code int) {
-			exitCalled = true
-		}
-
 		err := enablePre(logger, 10)
 		assert.NoError(t, err, "should take over when log files are missing")
-		assert.False(t, exitCalled, "should not exit - unhealthy (no logs)")
 	})
 }
 
@@ -370,7 +328,7 @@ func Test_isLogFileFresh(t *testing.T) {
 		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
 
 		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-10 * time.Minute), nil // 10 minutes ago
+			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago (threshold is 10)
 		}
 
 		fresh, lastUpdate := isLogFileFresh("/some/log/folder")

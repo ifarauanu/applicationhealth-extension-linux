@@ -25,7 +25,7 @@ To run tests inside the dev container:
 
 ```bash
 make devcontainer
-cd /var/lib/waagent/Extension/bin
+# Inside the container:
 go test -v ./main/
 ```
 
@@ -35,8 +35,8 @@ The enable command is idempotent: if a healthy AHE process is already running wi
 sequence number, a new enable invocation will detect it and exit gracefully instead of
 restarting the process. This prevents unnecessary downtime during rolling upgrades.
 
-Health is determined by checking the log file freshness. A heartbeat is logged every 5 minutes.
-If the log file hasn't been updated within 6 minutes, the existing process is considered
+Health is determined by checking the handler.log file freshness. A heartbeat is logged every 5 minutes.
+If the log file hasn't been updated within 10 minutes, the existing process is considered
 unresponsive and the new process will take over.
 
 -----

@@ -16,8 +16,9 @@ const (
 
 	// Number of minutes to allow between log file updates before considering the existing process as unresponsive/stuck.
 	// If the log file hasn't been updated within this interval, a new instance should take over.
-	// This should be greater than RecordAppHealthHeartBeatIntervalInMinutes to allow for timing variations.
-	AppHealthLogFileStaleThresholdInMinutes = 6
+	// This should be significantly greater than RecordAppHealthHeartBeatIntervalInMinutes to allow
+	// for timing variations such as GC pauses, high CPU load, and cgroup throttling.
+	AppHealthLogFileStaleThresholdInMinutes = 10
 
 	// TODO: The github package responsible for HandlerEnvironment settings is no longer being maintained
 	// and it also doesn't have the latest properties like EventsFolder. Importing a separate package

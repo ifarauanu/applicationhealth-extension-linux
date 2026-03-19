@@ -111,6 +111,8 @@ fi
 
 # For enable command, skip killing existing processes - idempotency is handled
 # by the Go binary itself which checks if a healthy process is already running.
+# For non-enable commands (install, uninstall, update, disable), retain the
+# original kill behavior as a safety net.
 if [[ "$1" != "enable" ]]; then
     kill_existing_apphealth_processes
     # give vmwatch sub process time to die after on killing app health process

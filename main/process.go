@@ -18,7 +18,6 @@ var (
 	findExistingProcess   = findExistingProcessImpl
 	getLogFileLastModTime = getLogFileLastModTimeImpl
 	getHandlerEnvironment = handlerenv.GetHandlerEnviroment
-	osExit                = os.Exit
 )
 
 // findExistingProcessImpl scans /proc to find another running instance of the
@@ -64,39 +63,18 @@ func findExistingProcessImpl() (int, error) {
 	return 0, nil
 }
 
-// getLogFileLastModTimeImpl returns the most recent modification time among all
-// log files in the handler's log folder. This is used to determine if an
-// existing AHE process is still responsive (writing heartbeat logs).
+// getLogFileLastModTimeImpl returns the modification time of the handler log file
+// (handler.log) in the log folder. This is used to determine if an existing AHE
+// process is still responsive (writing heartbeat logs).
+// Only checks handler.log specifically to avoid false positives from other
+// processes (logrotate, monitoring agents) touching files in the same folder.
 func getLogFileLastModTimeImpl(logFolder string) (time.Time, error) {
-	entries, err := os.ReadDir(logFolder)
+	logFilePath := filepath.Join(logFolder, "handler.log")
+	info, err := os.Stat(logFilePath)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to read log folder %s: %w", logFolder, err)
+		return time.Time{}, fmt.Errorf("failed to stat handler log file %s: %w", logFilePath, err)
 	}
-
-	var mostRecent time.Time
-	found := false
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-
-		if info.ModTime().After(mostRecent) {
-			mostRecent = info.ModTime()
-			found = true
-		}
-	}
-
-	if !found {
-		return time.Time{}, fmt.Errorf("no log files found in %s", logFolder)
-	}
-
-	return mostRecent, nil
+	return info.ModTime(), nil
 }
 
 // isLogFileFresh checks whether the log file was updated within the stale
@@ -112,7 +90,9 @@ func isLogFileFresh(logFolder string) (bool, time.Time) {
 	return time.Since(lastModTime) < threshold, lastModTime
 }
 
-// killProcess sends SIGTERM to the specified process to allow graceful shutdown.
+// killProcess sends SIGTERM to the specified process and waits (bounded) for it
+// to exit before returning. This prevents a race where two AHE instances run
+// simultaneously during takeover.
 func killProcess(pid int) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -124,6 +104,24 @@ func killProcess(pid int) error {
 	}
 
 	telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
-		fmt.Sprintf("Sent SIGTERM to existing AHE process with PID %d", pid))
+		fmt.Sprintf("Sent SIGTERM to existing AHE process with PID %d, waiting for exit", pid))
+
+	// Wait up to 5 seconds for the process to exit
+	for i := 0; i < 10; i++ {
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			// Process is gone
+			telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Existing AHE process with PID %d has exited", pid))
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// SIGTERM did not work — escalate to SIGKILL
+	telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+		fmt.Sprintf("Existing AHE process with PID %d did not exit within 5 seconds after SIGTERM, sending SIGKILL", pid))
+	if err := process.Signal(syscall.SIGKILL); err != nil {
+		return fmt.Errorf("failed to send SIGKILL to process %d: %w", pid, err)
+	}
 	return nil
 }

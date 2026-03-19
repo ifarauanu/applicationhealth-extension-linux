@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/Azure/applicationhealth-extension-linux/internal/handlerenv"
 	"github.com/Azure/applicationhealth-extension-linux/internal/seqno"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +36,31 @@ func Test_commands_shouldReportStatus(t *testing.T) {
 	require.True(t, cmds["enable"].shouldReportStatus, "enable should report status")
 	require.True(t, cmds["disable"].shouldReportStatus, "disable should report status")
 	require.True(t, cmds["update"].shouldReportStatus, "update should report status")
+}
+
+// saveAndRestoreIdempotencyMocks saves original function variables and restores
+// them after the test to prevent test pollution.
+func saveAndRestoreIdempotencyMocks(t *testing.T) {
+	origFindExistingProcess := findExistingProcess
+	origGetLogFileLastModTime := getLogFileLastModTime
+	origGetHandlerEnvironment := getHandlerEnvironment
+	origOsExit := osExit
+	t.Cleanup(func() {
+		findExistingProcess = origFindExistingProcess
+		getLogFileLastModTime = origGetLogFileLastModTime
+		getHandlerEnvironment = origGetHandlerEnvironment
+		osExit = origOsExit
+	})
+}
+
+// mockNoExistingProcess sets up mocks so idempotency check finds no existing process
+func mockNoExistingProcess(t *testing.T) {
+	saveAndRestoreIdempotencyMocks(t)
+	findExistingProcess = func() (int, error) { return 0, nil }
+	getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+		return nil, fmt.Errorf("not available in test")
+	}
+	osExit = func(code int) { t.Fatalf("unexpected os.Exit(%d)", code) }
 }
 
 func Test_enablePre(t *testing.T) {
@@ -64,15 +92,17 @@ func Test_enablePre(t *testing.T) {
 	t.Run("SequenceNumberisZero_Startup", func(t *testing.T) {
 		// seqNumToProcess = 0, mrSeqNum = 0
 		seqNumToProcess = 0
+		mockNoExistingProcess(t)
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(0), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 		seqnoManager = mockSeqNumManager
 		err := enablePre(logger, seqNumToProcess)
 		assert.NoError(t, err)
 	})
-	t.Run("SequenceNumberAlreadyProcessed", func(t *testing.T) {
-		// seqNumToProcess = 5, mrSeqNum = 5
+	t.Run("SequenceNumberAlreadyProcessed_NoExistingProcess", func(t *testing.T) {
+		// seqNumToProcess = 5, mrSeqNum = 5, no existing process → should continue
 		seqNumToProcess = 5
+		mockNoExistingProcess(t)
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(5), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
@@ -82,10 +112,282 @@ func Test_enablePre(t *testing.T) {
 	t.Run("MostRecentSeqNumIsSmaller_ShouldPass", func(t *testing.T) {
 		// seqNumToProcess = 4, mrSeqNum = 2
 		seqNumToProcess = 4
+		mockNoExistingProcess(t)
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(2), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 		seqnoManager = mockSeqNumManager
 		err := enablePre(logger, seqNumToProcess)
 		assert.NoError(t, err)
+	})
+}
+
+func Test_enablePre_Idempotency(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	ctrl := gomock.NewController(t)
+	mockSeqNumManager := seqno.NewMockSequenceNumberManager(ctrl)
+
+	// Test Case 1: Same seq + healthy process → new process exits
+	t.Run("SameSeq_HealthyProcess_ShouldExit", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(20), nil)
+
+		logDir := t.TempDir()
+		// Create a fresh log file (recently modified)
+		os.WriteFile(logDir+"/handler.log", []byte("heartbeat"), 0644)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-1 * time.Minute), nil // 1 minute ago = fresh
+		}
+		findExistingProcess = func() (int, error) {
+			return 1234, nil // existing process found
+		}
+
+		exitCalled := false
+		exitCode := -1
+		osExit = func(code int) {
+			exitCalled = true
+			exitCode = code
+		}
+
+		err := enablePre(logger, 20) // same sequence number
+		assert.NoError(t, err)
+		assert.True(t, exitCalled, "os.Exit should have been called for idempotent exit")
+		assert.Equal(t, 0, exitCode, "should exit with code 0")
+	})
+
+	// Test Case 2: Same seq + unhealthy process → new process takes over
+	t.Run("SameSeq_UnhealthyProcess_ShouldTakeOver", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(21), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-10 * time.Minute), nil // 10 minutes ago = stale
+		}
+		findExistingProcess = func() (int, error) {
+			return 5678, nil // existing process found
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 21) // same sequence number
+		assert.NoError(t, err)
+		assert.False(t, exitCalled, "os.Exit should NOT have been called - new process should take over")
+	})
+
+	// Test Case 3: Lower seq (existing) + healthy process → new process continues
+	t.Run("HigherSeq_HealthyExistingProcess_ShouldContinue", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		// mrSeqNum = 36, seqNum = 37 → seqNum > mrSeqNum, different seq
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(36), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-1 * time.Minute), nil
+		}
+		findExistingProcess = func() (int, error) {
+			return 5492, nil
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 37)
+		assert.NoError(t, err)
+		assert.False(t, exitCalled, "new process with higher seq should continue")
+	})
+
+	// Test Case 5: Higher seq (existing) + healthy process → new process exits
+	t.Run("LowerSeq_HealthyExistingProcess_ShouldFail", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		// mrSeqNum = 26, seqNum = 25 → seqNum < mrSeqNum
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(26), nil)
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 25)
+		assert.Error(t, err, "lower sequence number should fail")
+		assert.False(t, exitCalled, "should not call os.Exit, should return error")
+	})
+
+	// Test Case 6: Higher seq (existing) + unhealthy process → new process exits (seq takes precedence)
+	t.Run("LowerSeq_UnhealthyExistingProcess_ShouldFail", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		// mrSeqNum = 26, seqNum = 25 → seqNum < mrSeqNum
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(26), nil)
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 25)
+		assert.Error(t, err, "lower sequence number should fail regardless of health")
+		assert.False(t, exitCalled)
+	})
+
+	// Test Case 7: No existing AHE process → normal startup
+	t.Run("SameSeq_NoExistingProcess_ShouldContinue", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-20 * time.Minute), nil // stale
+		}
+		findExistingProcess = func() (int, error) {
+			return 0, nil // no existing process
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 10)
+		assert.NoError(t, err)
+		assert.False(t, exitCalled, "should not exit when no existing process")
+	})
+
+	// Edge case: getHandlerEnvironment fails → should continue gracefully
+	t.Run("SameSeq_HandlerEnvError_ShouldContinue", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(15), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return nil, fmt.Errorf("handler env not available")
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 15)
+		assert.NoError(t, err, "should continue gracefully when handler env is unavailable")
+		assert.False(t, exitCalled)
+	})
+
+	// Edge case: findExistingProcess fails → should continue gracefully
+	t.Run("SameSeq_ProcessDiscoveryError_ShouldContinue", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(15), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now(), nil
+		}
+		findExistingProcess = func() (int, error) {
+			return 0, fmt.Errorf("proc filesystem error")
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 15)
+		assert.NoError(t, err, "should continue gracefully on process discovery error")
+		assert.False(t, exitCalled)
+	})
+
+	// Edge case: No log files (fresh install) → should continue
+	t.Run("SameSeq_NoLogFiles_ShouldContinue", func(t *testing.T) {
+		saveAndRestoreIdempotencyMocks(t)
+		seqnoManager = mockSeqNumManager
+		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+
+		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
+			return &handlerenv.HandlerEnvironment{}, nil
+		}
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Time{}, fmt.Errorf("no log files found")
+		}
+		findExistingProcess = func() (int, error) {
+			return 9999, nil // process exists
+		}
+
+		exitCalled := false
+		osExit = func(code int) {
+			exitCalled = true
+		}
+
+		err := enablePre(logger, 10)
+		assert.NoError(t, err, "should take over when log files are missing")
+		assert.False(t, exitCalled, "should not exit - unhealthy (no logs)")
+	})
+}
+
+func Test_isLogFileFresh(t *testing.T) {
+	t.Run("FreshLogFile_ShouldReturnTrue", func(t *testing.T) {
+		origGetLogFileLastModTime := getLogFileLastModTime
+		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-3 * time.Minute), nil // 3 minutes ago
+		}
+
+		fresh, lastUpdate := isLogFileFresh("/some/log/folder")
+		assert.True(t, fresh)
+		assert.False(t, lastUpdate.IsZero())
+	})
+
+	t.Run("StaleLogFile_ShouldReturnFalse", func(t *testing.T) {
+		origGetLogFileLastModTime := getLogFileLastModTime
+		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Now().Add(-10 * time.Minute), nil // 10 minutes ago
+		}
+
+		fresh, lastUpdate := isLogFileFresh("/some/log/folder")
+		assert.False(t, fresh)
+		assert.False(t, lastUpdate.IsZero())
+	})
+
+	t.Run("ErrorGettingLogFile_ShouldReturnFalse", func(t *testing.T) {
+		origGetLogFileLastModTime := getLogFileLastModTime
+		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+
+		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+			return time.Time{}, fmt.Errorf("error reading log files")
+		}
+
+		fresh, lastUpdate := isLogFileFresh("/some/log/folder")
+		assert.False(t, fresh)
+		assert.True(t, lastUpdate.IsZero())
 	})
 }

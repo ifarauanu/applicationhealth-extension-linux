@@ -85,6 +85,14 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to get current sequence number")
 	}
+
+	// Check idempotency: before sequence number comparison, check if an existing
+	// healthy process is already running with the same sequence number.
+	// This must happen before we write any logs so we don't detect our own writes.
+	if mrSeqNum != 0 {
+		checkIdempotency(lg, seqNum, mrSeqNum)
+	}
+
 	// If the most recent sequence number is greater than or equal to the requested sequence number,
 	// then the script has already been run and we should exit.
 	if mrSeqNum != 0 && seqNum < mrSeqNum {
@@ -97,6 +105,68 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 		return errors.Wrap(err, "failed to save sequence number")
 	}
 	return nil
+}
+
+// checkIdempotency checks if another AHE instance is already running and decides
+// whether the current process should continue or exit based on sequence number
+// and existing process health status.
+func checkIdempotency(lg *slog.Logger, seqNum uint, mrSeqNum uint) {
+	// Only apply idempotency logic for same sequence number
+	if seqNum != mrSeqNum {
+		return
+	}
+
+	// Check log file freshness to determine if existing process is responsive
+	hEnv, err := getHandlerEnvironment()
+	if err != nil {
+		lg.Warn(fmt.Sprintf("Failed to get handler environment for idempotency check: %v", err))
+		return
+	}
+
+	logFresh, lastUpdate := isLogFileFresh(hEnv.LogFolder)
+	if logFresh {
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Existing process log file was fresh at startup. Last update: %s UTC.", lastUpdate.UTC().Format(time.RFC3339Nano)))
+	} else {
+		telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Existing process log file was stale at startup. Last update: %s UTC, Threshold: %d minutes. Process may be stuck.",
+				lastUpdate.UTC().Format(time.RFC3339Nano), AppHealthLogFileStaleThresholdInMinutes))
+	}
+
+	// Check if another AHE process is already running
+	existingPid, err := findExistingProcess()
+	if err != nil {
+		lg.Warn(fmt.Sprintf("Failed to check for existing process: %v", err))
+		return
+	}
+
+	processRunning := existingPid > 0
+	if processRunning {
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("IsHandlerStillExecuting: Process Name='%s', PID=%d, result=True", AppHealthBinaryNameAmd64, existingPid))
+	} else {
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("IsHandlerStillExecuting: Process Name='%s', result=False", AppHealthBinaryNameAmd64))
+		return
+	}
+
+	// Same sequence number + process running + log fresh → exit to maintain idempotency
+	if logFresh {
+		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Another instance of AppHealthExtension is already running with the same sequence number (%d) and is responsive. PID %d exiting to maintain idempotency.",
+				seqNum, os.Getpid()))
+		osExit(0)
+		return
+	}
+
+	// Same sequence number + process running + log stale → take over execution
+	telemetry.SendEvent(telemetry.WarningEvent, telemetry.AppHealthTask,
+		fmt.Sprintf("Another instance of AppHealthExtension exists with the same sequence number (%d) but appears unresponsive (log file stale). PID %d taking over execution.",
+			seqNum, os.Getpid()))
+
+	if err := killProcess(existingPid); err != nil {
+		lg.Warn(fmt.Sprintf("Failed to terminate existing unhealthy process %d: %v", existingPid, err))
+	}
 }
 
 func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (string, error) {

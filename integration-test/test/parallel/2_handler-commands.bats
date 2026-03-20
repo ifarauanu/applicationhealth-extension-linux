@@ -40,16 +40,19 @@ teardown(){
 }
 
 @test "handler command: enable twice, process exits cleanly" {
-    mk_container $container_name sh -c "fake-waagent install && fake-waagent enable && wait-for-enable && rm /var/lib/waagent/Extension/status/0.status && fake-waagent enable && wait-for-enable status"
+    mk_container $container_name sh -c "fake-waagent install && fake-waagent enable && wait-for-enable && fake-waagent enable && sleep 2"
     push_settings '' ''
 
     run start_container
     echo "$output"
-    [[ "$output" = *'applicationhealth-extension process terminated'* ]]
 
+    # Second enable should detect the existing healthy process and exit cleanly (idempotent)
+    [[ "$output" = *'Idempotent exit: extension already running with current configuration'* ]]
+
+    # Only one process should have reached the healthy state (the first one)
     healthy_count="$(echo "$output" | grep -c 'Health state changed to healthy')"
     echo "Enable count=$healthy_count"
-    [ "$healthy_count" -eq 2 ]
+    [ "$healthy_count" -eq 1 ]
 
     diff="$(container_diff)"; echo "$diff"
     [[ "$diff" = *"A /var/lib/waagent/Extension/status/0.status"* ]]

@@ -101,28 +101,24 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	// Discover existing AHE processes once and reuse the result for both
 	// idempotency checks and new-sequence-number cleanup.
 	var existingPids []int
-	if mrSeqNum != 0 {
-		pids, err := findExistingProcesses()
-		if err != nil {
+	pids, err := findExistingProcesses()
+	if err != nil {
+		logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Failed to discover existing processes: %v", err), "error", err)
+	} else {
+		existingPids = pids
+		if len(pids) > 1 {
 			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
-				fmt.Sprintf("Failed to discover existing processes: %v", err), "error", err)
-		} else {
-			existingPids = pids
-			if len(pids) > 1 {
-				logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
-					fmt.Sprintf("Found %d existing AHE processes (PIDs: %v). Expected at most 1.", len(pids), pids),
-					"pids", pids)
-			}
+				fmt.Sprintf("Found %d existing AHE processes (PIDs: %v). Expected at most 1.", len(pids), pids),
+				"pids", pids)
 		}
 	}
 
-	// Check idempotency: before sequence number comparison, check if an existing
-	// healthy process is already running with the same sequence number.
+	// Check idempotency: if an existing healthy process is already running
+	// with the same sequence number, exit cleanly.
 	// This must happen before we write any logs so we don't detect our own writes.
-	if mrSeqNum != 0 {
-		if shouldExit := checkIdempotency(lg, seqNum, mrSeqNum, existingPids); shouldExit {
-			return errIdempotentExit
-		}
+	if shouldExit := checkIdempotency(lg, seqNum, mrSeqNum, existingPids); shouldExit {
+		return errIdempotentExit
 	}
 
 	// If the most recent sequence number is greater than or equal to the requested sequence number,
@@ -133,7 +129,7 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	}
 
 	// New sequence number — kill any existing processes from previous sequence
-	if seqNum > mrSeqNum && mrSeqNum != 0 && len(existingPids) > 0 {
+	if seqNum > mrSeqNum && len(existingPids) > 0 {
 		lg.Info("Killing existing processes from previous sequence number", "pids", existingPids, "oldSeq", mrSeqNum, "newSeq", seqNum)
 		telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
 			fmt.Sprintf("Killing existing processes PIDs=%v from previous sequence number %d, new sequence number %d", existingPids, mrSeqNum, seqNum))

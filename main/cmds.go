@@ -286,7 +286,11 @@ func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (str
 		// Check if a newer sequence number has been started by another process.
 		// If so, this process has a stale configuration and should exit gracefully.
 		mostRecentSequenceNumberStarted, err := seqnoManager.GetCurrentSequenceNumber(lg, fullName, "")
-		if err == nil && seqNum < mostRecentSequenceNumberStarted {
+		if err != nil {
+			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Failed to read current sequence number: %v. Continuing with current configuration.", err),
+				"error", err)
+		} else if seqNum < mostRecentSequenceNumberStarted {
 			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
 				fmt.Sprintf("Current sequence number %d is not greater than the most recently started sequence number %d. PID %d initiating graceful shutdown.",
 					seqNum, mostRecentSequenceNumberStarted, os.Getpid()),

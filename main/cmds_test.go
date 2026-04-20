@@ -247,15 +247,16 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		assert.NoError(t, err, "should continue gracefully on process discovery error")
 	})
 
-	// Edge case: No log files (fresh install / race condition) + existing process →
-	// should exit idempotently rather than killing a potentially healthy process.
-	// The log file may not exist yet if the process just started.
-	// A truly stuck process will be caught on the next enable call
-	// once the file exists with an old timestamp.
-	t.Run("SameSeq_NoLogFiles_ShouldExitIdempotently", func(t *testing.T) {
+	// Edge case: No log files (file does not exist) + existing process →
+	// should take over execution. If no log file exists, no previous process
+	// was writing heartbeats, so the existing process is treated as unresponsive.
+	// If no log file exists, no previous process was writing heartbeats,
+	// so the existing process is treated as unresponsive.
+	t.Run("SameSeq_NoLogFiles_ShouldTakeOver", func(t *testing.T) {
 		saveAndRestoreIdempotencyMocks(t)
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
+		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
 		logFileLastWriteTimeBeforeStartup = time.Time{}
 		logFileLastWriteTimeErr = fmt.Errorf("no log files found")
@@ -264,7 +265,31 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		}
 
 		err := enablePre(logger, 10)
-		assert.ErrorIs(t, err, errIdempotentExit, "should exit idempotently when log file is missing but process exists")
+		assert.NoError(t, err, "should take over when log file is missing")
+	})
+}
+
+func Test_getHandlerLogDir(t *testing.T) {
+	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
+		t.Setenv("LOG_DIR", "/custom/log/dir")
+		assert.Equal(t, "/custom/log/dir", getHandlerLogDir())
+	})
+
+	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
+		t.Setenv("LOG_DIR", "")
+		assert.Equal(t, DefaultHandlerLogDir, getHandlerLogDir())
+	})
+}
+
+func Test_getHandlerLogFile(t *testing.T) {
+	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
+		t.Setenv("LOG_FILE", "custom.log")
+		assert.Equal(t, "custom.log", getHandlerLogFile())
+	})
+
+	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
+		t.Setenv("LOG_FILE", "")
+		assert.Equal(t, DefaultHandlerLogFile, getHandlerLogFile())
 	})
 }
 
@@ -273,11 +298,11 @@ func Test_isLogFileFresh(t *testing.T) {
 		origGetLogFileLastWriteTime := getLogFileLastWriteTime
 		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
+		getLogFileLastWriteTime = func() (time.Time, error) {
 			return time.Now().Add(-3 * time.Minute), nil // 3 minutes ago
 		}
 
-		fresh, lastUpdate, err := isLogFileFresh("/some/log/folder")
+		fresh, lastUpdate, err := isLogFileFresh()
 		assert.True(t, fresh)
 		assert.False(t, lastUpdate.IsZero())
 		assert.NoError(t, err)
@@ -287,11 +312,11 @@ func Test_isLogFileFresh(t *testing.T) {
 		origGetLogFileLastWriteTime := getLogFileLastWriteTime
 		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago (threshold is 10)
+		getLogFileLastWriteTime = func() (time.Time, error) {
+			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago (threshold is 6)
 		}
 
-		fresh, lastUpdate, err := isLogFileFresh("/some/log/folder")
+		fresh, lastUpdate, err := isLogFileFresh()
 		assert.False(t, fresh)
 		assert.False(t, lastUpdate.IsZero())
 		assert.NoError(t, err)
@@ -301,11 +326,11 @@ func Test_isLogFileFresh(t *testing.T) {
 		origGetLogFileLastWriteTime := getLogFileLastWriteTime
 		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
+		getLogFileLastWriteTime = func() (time.Time, error) {
 			return time.Time{}, fmt.Errorf("error reading log files")
 		}
 
-		fresh, lastUpdate, err := isLogFileFresh("/some/log/folder")
+		fresh, lastUpdate, err := isLogFileFresh()
 		assert.False(t, fresh)
 		assert.True(t, lastUpdate.IsZero())
 		assert.Error(t, err)

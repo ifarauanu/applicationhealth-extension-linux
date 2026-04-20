@@ -69,8 +69,17 @@ func main() {
 	// Capture the log file's last write time before any logging by this process.
 	// The shim redirects stdout to the same log file, so any log output from
 	// this process would refresh the mtime and make a stale existing process
-	// appear fresh.
-	logFileLastWriteTimeBeforeStartup, logFileLastWriteTimeErr = getLogFileLastWriteTime(hEnv.LogFolder)
+	// appear fresh. Retry up to 3 times with 1-second delays to handle transient
+	// I/O errors.
+	for attempt := 1; attempt <= 3; attempt++ {
+		logFileLastWriteTimeBeforeStartup, logFileLastWriteTimeErr = getLogFileLastWriteTime()
+		if logFileLastWriteTimeErr == nil {
+			break
+		}
+		if attempt < 3 {
+			time.Sleep(1 * time.Second)
+		}
+	}
 
 	seqNum, err := seqnoManager.FindSeqNum(hEnv.ConfigFolder)
 	if err != nil {

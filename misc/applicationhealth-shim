@@ -2,8 +2,8 @@
 
 set -euo pipefail
 readonly SCRIPT_DIR=$(dirname "$0")
-readonly LOG_DIR="/var/log/azure/applicationhealth-extension"
-readonly LOG_FILE=handler.log
+export readonly LOG_DIR="/var/log/azure/applicationhealth-extension"
+export readonly LOG_FILE=handler.log
 readonly ARCHITECTURE=$( [[ "$(uname -p)" == "unknown" ]] && echo "$(uname -m)" || echo "$(uname -p)" )
 VMWATCH_BIN="vmwatch_linux_amd64"
 HANDLER_BIN="applicationhealth-extension"

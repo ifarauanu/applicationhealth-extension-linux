@@ -66,13 +66,30 @@ func findExistingProcessesImpl() ([]int, error) {
 	return pids, nil
 }
 
-// getLogFileLastWriteTimeImpl returns the last write time of the handler log file
-// (handler.log) in the log folder. This is used to determine if an existing AHE
-// process is still responsive (writing heartbeat logs).
-// Only checks handler.log specifically to avoid false positives from other
-// processes (logrotate, monitoring agents) touching files in the same folder.
-func getLogFileLastWriteTimeImpl(logFolder string) (time.Time, error) {
-	logFilePath := filepath.Join(logFolder, "handler.log")
+// getHandlerLogDir returns the handler log directory from the LOG_DIR
+// environment variable (exported by the shim), falling back to DefaultHandlerLogDir.
+func getHandlerLogDir() string {
+	if dir := os.Getenv("LOG_DIR"); dir != "" {
+		return dir
+	}
+	return DefaultHandlerLogDir
+}
+
+// getHandlerLogFile returns the handler log file name from the LOG_FILE
+// environment variable (exported by the shim), falling back to DefaultHandlerLogFile.
+func getHandlerLogFile() string {
+	if file := os.Getenv("LOG_FILE"); file != "" {
+		return file
+	}
+	return DefaultHandlerLogFile
+}
+
+// getLogFileLastWriteTimeImpl returns the last write time of the handler log file.
+// Uses getHandlerLogDir() and getHandlerLogFile() to locate the file.
+// This is used to determine if an existing AHE process is still responsive
+// (writing heartbeat logs).
+func getLogFileLastWriteTimeImpl() (time.Time, error) {
+	logFilePath := filepath.Join(getHandlerLogDir(), getHandlerLogFile())
 	info, err := os.Stat(logFilePath)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to stat handler log file %s: %w", logFilePath, err)
@@ -83,8 +100,8 @@ func getLogFileLastWriteTimeImpl(logFolder string) (time.Time, error) {
 // isLogFileFresh checks whether the log file was updated within the stale
 // threshold (AppHealthLogFileStaleThresholdInMinutes). Returns true if fresh,
 // along with the last modification time and any error from reading the file.
-func isLogFileFresh(logFolder string) (bool, time.Time, error) {
-	lastWriteTime, err := getLogFileLastWriteTime(logFolder)
+func isLogFileFresh() (bool, time.Time, error) {
+	lastWriteTime, err := getLogFileLastWriteTime()
 	if err != nil {
 		return false, time.Time{}, err
 	}

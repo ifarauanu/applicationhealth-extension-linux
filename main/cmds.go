@@ -175,14 +175,16 @@ func checkIdempotency(lg *slog.Logger, seqNum uint, mrSeqNum uint, existingPids 
 	lastUpdate := logFileLastWriteTimeBeforeStartup
 	logFileErr := logFileLastWriteTimeErr
 
-	// Could not determine log file timestamp (e.g., file not created yet, I/O errors).
-	// Assume responsive to avoid killing a potentially healthy process.
+	// Could not determine log file timestamp after retries (e.g., file does not exist, I/O errors).
+	// Treat as not responsive — if no log file exists, no previous process was writing heartbeats.
 	if logFileErr != nil {
 		logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
-			fmt.Sprintf("Could not determine log file last write time: %v. Assuming existing process is responsive to avoid killing a healthy process. PID %d exiting to maintain idempotency.",
+			fmt.Sprintf("Could not determine log file last write time: %v. Existing process appears unresponsive. PID %d taking over execution.",
 				logFileErr, os.Getpid()),
 			"error", logFileErr, "seqNum", seqNum, "existingPids", existingPids, "currentPid", os.Getpid())
-		return true
+
+		killProcesses(lg, existingPids)
+		return false
 	}
 
 	threshold := time.Duration(AppHealthLogFileStaleThresholdInMinutes) * time.Minute
@@ -281,6 +283,17 @@ func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (str
 	//	1. Grace period expires, then application will either be Unknown/Unhealthy depending on probe type
 	//	2. A valid health state is observed numberOfProbes consecutive times
 	for {
+		// Check if a newer sequence number has been started by another process.
+		// If so, this process has a stale configuration and should exit gracefully.
+		mostRecentSequenceNumberStarted, err := seqnoManager.GetCurrentSequenceNumber(lg, fullName, "")
+		if err == nil && seqNum < mostRecentSequenceNumberStarted {
+			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Current sequence number %d is not greater than the most recently started sequence number %d. PID %d initiating graceful shutdown.",
+					seqNum, mostRecentSequenceNumberStarted, os.Getpid()),
+				"sequenceNumber", seqNum, "mostRecentSequenceNumberStarted", mostRecentSequenceNumberStarted, "currentPid", os.Getpid())
+			return "", errTerminated
+		}
+
 		// Since we only log health state changes, it is possible there will be no recent logs for app health extension.
 		// As an indication that the extension is running, we log app health extension heart beat at a set interval.
 		LogHeartBeat()

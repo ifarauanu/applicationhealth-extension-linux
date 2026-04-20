@@ -16,9 +16,17 @@ const (
 
 	// Number of minutes to allow between log file updates before considering the existing process as unresponsive/stuck.
 	// If the log file hasn't been updated within this interval, a new instance should take over.
-	// This should be significantly greater than RecordAppHealthHeartBeatIntervalInMinutes to allow
+	// This should be greater than RecordAppHealthHeartBeatIntervalInMinutes (5 min) to allow
 	// for timing variations such as GC pauses, high CPU load, and cgroup throttling.
-	AppHealthLogFileStaleThresholdInMinutes = 10
+	AppHealthLogFileStaleThresholdInMinutes = 6
+
+	// DefaultHandlerLogDir is the default directory where the shim writes handler.log.
+	// The shim exports HANDLER_LOG_DIR; use getHandlerLogDir() to read it with this fallback.
+	DefaultHandlerLogDir = "/var/log/azure/applicationhealth-extension"
+
+	// DefaultHandlerLogFile is the default log file name written by the shim.
+	// The shim exports HANDLER_LOG_FILE; use getHandlerLogFile() to read it with this fallback.
+	DefaultHandlerLogFile = "handler.log"
 
 	// TODO: The github package responsible for HandlerEnvironment settings is no longer being maintained
 	// and it also doesn't have the latest properties like EventsFolder. Importing a separate package

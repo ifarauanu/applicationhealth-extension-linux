@@ -75,10 +75,11 @@ func main() {
 	if cmd.pre != nil {
 		logger.Info("pre-check")
 		if err := cmd.pre(logger, seqNum); err != nil {
-			// Idempotent exit: healthy process already running, write success status and exit cleanly
+			// Idempotent exit: healthy process already running, exit cleanly.
+			// Do NOT overwrite the status file — the running process already
+			// wrote the correct status with substatuses (AppHealthStatus, etc.).
 			if errors.Is(err, errIdempotentExit) {
 				telemetry.SendEvent(telemetry.InfoEvent, telemetry.MainTask, "Idempotent exit: extension already running with current configuration")
-				reportStatus(logger, hEnv, seqNum, StatusSuccess, cmd, "Extension already running")
 				os.Exit(0)
 			}
 			telemetry.SendEvent(telemetry.ErrorEvent, telemetry.MainTask, "pre-check failed", "error", err.Error())

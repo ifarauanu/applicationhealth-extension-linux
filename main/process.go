@@ -81,15 +81,15 @@ func getLogFileLastModTimeImpl(logFolder string) (time.Time, error) {
 
 // isLogFileFresh checks whether the log file was updated within the stale
 // threshold (AppHealthLogFileStaleThresholdInMinutes). Returns true if fresh,
-// along with the last modification time.
-func isLogFileFresh(logFolder string) (bool, time.Time) {
+// along with the last modification time and any error from reading the file.
+func isLogFileFresh(logFolder string) (bool, time.Time, error) {
 	lastModTime, err := getLogFileLastModTime(logFolder)
 	if err != nil {
-		return false, time.Time{}
+		return false, time.Time{}, err
 	}
 
 	threshold := time.Duration(AppHealthLogFileStaleThresholdInMinutes) * time.Minute
-	return time.Since(lastModTime) < threshold, lastModTime
+	return time.Since(lastModTime) < threshold, lastModTime, nil
 }
 
 // killProcesses sends SIGTERM to all specified processes and waits for each to exit.

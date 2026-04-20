@@ -173,7 +173,18 @@ func checkIdempotency(lg *slog.Logger, seqNum uint, mrSeqNum uint, existingPids 
 		return false
 	}
 
-	logFresh, lastUpdate := isLogFileFresh(hEnv.LogFolder)
+	logFresh, lastUpdate, logFileErr := isLogFileFresh(hEnv.LogFolder)
+
+	// Could not determine log file timestamp (e.g., file not created yet, I/O errors).
+	// Assume responsive to avoid killing a potentially healthy process.
+	if logFileErr != nil {
+		logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
+			fmt.Sprintf("Could not determine log file last write time: %v. Assuming existing process is responsive to avoid killing a healthy process. PID %d exiting to maintain idempotency.",
+				logFileErr, os.Getpid()),
+			"error", logFileErr, "seqNum", seqNum, "existingPids", existingPids, "currentPid", os.Getpid())
+		return true
+	}
+
 	if logFresh {
 		logAndSend(lg, telemetry.InfoEvent, telemetry.AppHealthTask,
 			fmt.Sprintf("Existing process log file was fresh at startup. Last update: %s UTC.", lastUpdate.UTC().Format(time.RFC3339Nano)),

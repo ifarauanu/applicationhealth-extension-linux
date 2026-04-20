@@ -131,6 +131,13 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 		return errors.Errorf("most recent sequence number %d is greater than the requested sequence number %d", mrSeqNum, seqNum)
 	}
 
+	// Save the sequence number before killing old processes. This ensures that
+	// if a crash occurs after killing but before persisting, the sequence number
+	// is already recorded and a subsequent restart can proceed correctly.
+	if err := seqnoManager.SetSequenceNumber(fullName, "", seqNum); err != nil {
+		return errors.Wrap(err, "failed to save sequence number")
+	}
+
 	// New sequence number — kill any existing processes from previous sequence
 	if seqNum > mrSeqNum && len(existingPids) > 0 {
 		lg.Info("Killing existing processes from previous sequence number", "pids", existingPids, "oldSeq", mrSeqNum, "newSeq", seqNum)
@@ -139,10 +146,6 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 		killProcesses(lg, existingPids)
 	}
 
-	// save the sequence number
-	if err := seqnoManager.SetSequenceNumber(fullName, "", seqNum); err != nil {
-		return errors.Wrap(err, "failed to save sequence number")
-	}
 	return nil
 }
 

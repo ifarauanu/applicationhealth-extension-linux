@@ -155,5 +155,16 @@ func killProcess(pid int) error {
 	if err := process.Signal(syscall.SIGKILL); err != nil {
 		return fmt.Errorf("failed to send SIGKILL to process %d: %w", pid, err)
 	}
-	return nil
+
+	// Wait up to 2 seconds for the process to die after SIGKILL
+	for i := 0; i < 4; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			telemetry.SendEvent(telemetry.InfoEvent, telemetry.AppHealthTask,
+				fmt.Sprintf("Existing AHE process with PID %d has exited after SIGKILL", pid))
+			return nil
+		}
+	}
+
+	return fmt.Errorf("process %d did not exit after SIGKILL within 2 seconds", pid)
 }

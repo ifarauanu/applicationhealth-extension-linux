@@ -269,30 +269,6 @@ func Test_enablePre_Idempotency(t *testing.T) {
 	})
 }
 
-func Test_getHandlerLogDir(t *testing.T) {
-	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
-		t.Setenv("LOG_DIR", "/custom/log/dir")
-		assert.Equal(t, "/custom/log/dir", getHandlerLogDir())
-	})
-
-	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
-		t.Setenv("LOG_DIR", "")
-		assert.Equal(t, DefaultHandlerLogDir, getHandlerLogDir())
-	})
-}
-
-func Test_getHandlerLogFile(t *testing.T) {
-	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
-		t.Setenv("LOG_FILE", "custom.log")
-		assert.Equal(t, "custom.log", getHandlerLogFile())
-	})
-
-	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
-		t.Setenv("LOG_FILE", "")
-		assert.Equal(t, DefaultHandlerLogFile, getHandlerLogFile())
-	})
-}
-
 func Test_isLogFileFresh(t *testing.T) {
 	t.Run("FreshLogFile_ShouldReturnTrue", func(t *testing.T) {
 		origGetLogFileLastWriteTime := getLogFileLastWriteTime

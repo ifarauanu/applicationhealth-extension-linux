@@ -24,6 +24,8 @@ var (
 
 // findExistingProcessesImpl scans /proc to find all other running instances of the
 // Application Health Extension binary (excluding the current process).
+// Uses /proc/<pid>/exe (kernel-controlled symlink to the actual binary) for process
+// identification, which cannot be spoofed unlike /proc/<pid>/cmdline.
 // Returns a slice of PIDs of existing processes (empty if none found).
 func findExistingProcessesImpl() ([]int, error) {
 	myPid := os.Getpid()
@@ -44,21 +46,25 @@ func findExistingProcessesImpl() ([]int, error) {
 			continue
 		}
 
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		// Use /proc/<pid>/exe symlink to identify the binary — this is set by
+		// the kernel and cannot be modified by the process itself.
+		exePath, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
 		if err != nil {
 			continue
 		}
 
-		// /proc/<pid>/cmdline contains null-separated arguments
-		cmdStr := string(cmdline)
-		parts := strings.Split(cmdStr, "\x00")
-		if len(parts) < 2 {
+		procName := filepath.Base(exePath)
+		if procName != AppHealthBinaryNameAmd64 && procName != AppHealthBinaryNameArm64 {
 			continue
 		}
 
-		procName := filepath.Base(parts[0])
-		// Check if the process is an AHE binary running with "enable" argument
-		if (procName == AppHealthBinaryNameAmd64 || procName == AppHealthBinaryNameArm64) && parts[1] == "enable" {
+		// Verify the process is running with "enable" argument via cmdline
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		parts := strings.Split(string(cmdline), "\x00")
+		if len(parts) >= 2 && parts[1] == "enable" {
 			pids = append(pids, pid)
 		}
 	}

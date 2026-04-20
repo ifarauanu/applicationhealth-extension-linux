@@ -16,9 +16,10 @@ import (
 
 // Package-level function variables to allow mocking in tests
 var (
-	findExistingProcesses = findExistingProcessesImpl
-	getLogFileLastModTime  = getLogFileLastModTimeImpl
+	findExistingProcesses  = findExistingProcessesImpl
+	getLogFileLastWriteTime = getLogFileLastWriteTimeImpl
 	getHandlerEnvironment  = handlerenv.GetHandlerEnviroment
+	killProcesses          = killProcessesImpl
 )
 
 // findExistingProcessesImpl scans /proc to find all other running instances of the
@@ -65,12 +66,12 @@ func findExistingProcessesImpl() ([]int, error) {
 	return pids, nil
 }
 
-// getLogFileLastModTimeImpl returns the modification time of the handler log file
+// getLogFileLastWriteTimeImpl returns the last write time of the handler log file
 // (handler.log) in the log folder. This is used to determine if an existing AHE
 // process is still responsive (writing heartbeat logs).
 // Only checks handler.log specifically to avoid false positives from other
 // processes (logrotate, monitoring agents) touching files in the same folder.
-func getLogFileLastModTimeImpl(logFolder string) (time.Time, error) {
+func getLogFileLastWriteTimeImpl(logFolder string) (time.Time, error) {
 	logFilePath := filepath.Join(logFolder, "handler.log")
 	info, err := os.Stat(logFilePath)
 	if err != nil {
@@ -83,18 +84,18 @@ func getLogFileLastModTimeImpl(logFolder string) (time.Time, error) {
 // threshold (AppHealthLogFileStaleThresholdInMinutes). Returns true if fresh,
 // along with the last modification time and any error from reading the file.
 func isLogFileFresh(logFolder string) (bool, time.Time, error) {
-	lastModTime, err := getLogFileLastModTime(logFolder)
+	lastWriteTime, err := getLogFileLastWriteTime(logFolder)
 	if err != nil {
 		return false, time.Time{}, err
 	}
 
 	threshold := time.Duration(AppHealthLogFileStaleThresholdInMinutes) * time.Minute
-	return time.Since(lastModTime) < threshold, lastModTime, nil
+	return time.Since(lastWriteTime) < threshold, lastWriteTime, nil
 }
 
-// killProcesses sends SIGTERM to all specified processes and waits for each to exit.
+// killProcessesImpl sends SIGTERM to all specified processes and waits for each to exit.
 // Logs a warning for any process that cannot be killed but continues with the rest.
-func killProcesses(lg *slog.Logger, pids []int) {
+func killProcessesImpl(lg *slog.Logger, pids []int) {
 	for _, pid := range pids {
 		if err := killProcess(pid); err != nil {
 			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,

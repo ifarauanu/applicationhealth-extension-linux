@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/applicationhealth-extension-linux/internal/handlerenv"
 	"github.com/Azure/applicationhealth-extension-linux/internal/seqno"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,22 +41,23 @@ func Test_commands_shouldReportStatus(t *testing.T) {
 // them after the test to prevent test pollution.
 func saveAndRestoreIdempotencyMocks(t *testing.T) {
 	origFindExistingProcesses := findExistingProcesses
-	origGetLogFileLastModTime := getLogFileLastModTime
-	origGetHandlerEnvironment := getHandlerEnvironment
+	origKillProcesses := killProcesses
+	origLogFileLastWriteTime := logFileLastWriteTimeBeforeStartup
+	origLogFileLastWriteTimeErr := logFileLastWriteTimeErr
 	t.Cleanup(func() {
 		findExistingProcesses = origFindExistingProcesses
-		getLogFileLastModTime = origGetLogFileLastModTime
-		getHandlerEnvironment = origGetHandlerEnvironment
+		killProcesses = origKillProcesses
+		logFileLastWriteTimeBeforeStartup = origLogFileLastWriteTime
+		logFileLastWriteTimeErr = origLogFileLastWriteTimeErr
 	})
+	// Default to no-op kill in tests to avoid sending real signals
+	killProcesses = func(lg *slog.Logger, pids []int) {}
 }
 
 // mockNoExistingProcess sets up mocks so idempotency check finds no existing process
 func mockNoExistingProcess(t *testing.T) {
 	saveAndRestoreIdempotencyMocks(t)
 	findExistingProcesses = func() ([]int, error) { return nil, nil }
-	getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-		return nil, fmt.Errorf("not available in test")
-	}
 }
 
 func Test_enablePre(t *testing.T) {
@@ -129,12 +129,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(20), nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-1 * time.Minute), nil // 1 minute ago = fresh
-		}
+		logFileLastWriteTimeBeforeStartup = time.Now().Add(-1 * time.Minute) // 1 minute ago = fresh
+		logFileLastWriteTimeErr = nil
 		findExistingProcesses = func() ([]int, error) {
 			return []int{1234}, nil // existing process found
 		}
@@ -150,12 +146,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(21), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago = stale (threshold is 10)
-		}
+		logFileLastWriteTimeBeforeStartup = time.Now().Add(-15 * time.Minute) // 15 minutes ago = stale (threshold is 10)
+		logFileLastWriteTimeErr = nil
 		findExistingProcesses = func() ([]int, error) {
 			return []int{5678}, nil // existing process found
 		}
@@ -230,33 +222,14 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
 		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Now().Add(-20 * time.Minute), nil // stale
-		}
+		logFileLastWriteTimeBeforeStartup = time.Now().Add(-20 * time.Minute) // stale
+		logFileLastWriteTimeErr = nil
 		findExistingProcesses = func() ([]int, error) {
 			return nil, nil // no existing process
 		}
 
 		err := enablePre(logger, 10)
 		assert.NoError(t, err, "should not exit when no existing process")
-	})
-
-	// Edge case: getHandlerEnvironment fails → should continue gracefully
-	t.Run("SameSeq_HandlerEnvError_ShouldContinue", func(t *testing.T) {
-		saveAndRestoreIdempotencyMocks(t)
-		seqnoManager = mockSeqNumManager
-		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(15), nil)
-		mockSeqNumManager.EXPECT().SetSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
-
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return nil, fmt.Errorf("handler env not available")
-		}
-
-		err := enablePre(logger, 15)
-		assert.NoError(t, err, "should continue gracefully when handler env is unavailable")
 	})
 
 	// Edge case: findExistingProcesses fails → should continue gracefully
@@ -284,12 +257,8 @@ func Test_enablePre_Idempotency(t *testing.T) {
 		seqnoManager = mockSeqNumManager
 		mockSeqNumManager.EXPECT().GetCurrentSequenceNumber(gomock.Any(), gomock.Any(), gomock.Any()).Return(uint(10), nil)
 
-		getHandlerEnvironment = func() (*handlerenv.HandlerEnvironment, error) {
-			return &handlerenv.HandlerEnvironment{}, nil
-		}
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
-			return time.Time{}, fmt.Errorf("no log files found")
-		}
+		logFileLastWriteTimeBeforeStartup = time.Time{}
+		logFileLastWriteTimeErr = fmt.Errorf("no log files found")
 		findExistingProcesses = func() ([]int, error) {
 			return []int{9999}, nil // process exists
 		}
@@ -301,10 +270,10 @@ func Test_enablePre_Idempotency(t *testing.T) {
 
 func Test_isLogFileFresh(t *testing.T) {
 	t.Run("FreshLogFile_ShouldReturnTrue", func(t *testing.T) {
-		origGetLogFileLastModTime := getLogFileLastModTime
-		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+		origGetLogFileLastWriteTime := getLogFileLastWriteTime
+		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
 			return time.Now().Add(-3 * time.Minute), nil // 3 minutes ago
 		}
 
@@ -315,10 +284,10 @@ func Test_isLogFileFresh(t *testing.T) {
 	})
 
 	t.Run("StaleLogFile_ShouldReturnFalse", func(t *testing.T) {
-		origGetLogFileLastModTime := getLogFileLastModTime
-		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+		origGetLogFileLastWriteTime := getLogFileLastWriteTime
+		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
 			return time.Now().Add(-15 * time.Minute), nil // 15 minutes ago (threshold is 10)
 		}
 
@@ -329,10 +298,10 @@ func Test_isLogFileFresh(t *testing.T) {
 	})
 
 	t.Run("ErrorGettingLogFile_ShouldReturnFalse", func(t *testing.T) {
-		origGetLogFileLastModTime := getLogFileLastModTime
-		defer func() { getLogFileLastModTime = origGetLogFileLastModTime }()
+		origGetLogFileLastWriteTime := getLogFileLastWriteTime
+		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		getLogFileLastModTime = func(logFolder string) (time.Time, error) {
+		getLogFileLastWriteTime = func(logFolder string) (time.Time, error) {
 			return time.Time{}, fmt.Errorf("error reading log files")
 		}
 

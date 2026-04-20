@@ -115,7 +115,7 @@ fi
 # original kill behavior as a safety net.
 if [[ "$1" != "enable" ]]; then
     kill_existing_apphealth_processes
-    # give vmwatch sub process time to die after on killing app health process
+    # give vmwatch subprocess time to die after killing app health process
     sleep 1
     kill_existing_vmwatch_processes
 fi

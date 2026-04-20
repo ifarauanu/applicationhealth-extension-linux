@@ -15,9 +15,12 @@ import (
 // logAndSend logs a message via slog and sends a telemetry event in one call,
 // reducing the paired lg.Info/Warn + telemetry.SendEvent duplication.
 func logAndSend(lg *slog.Logger, level telemetry.EventLevel, task telemetry.EventTask, msg string, kvPairs ...any) {
-	if level == telemetry.WarningEvent || level == telemetry.ErrorEvent {
+	switch level {
+	case telemetry.ErrorEvent:
+		lg.Error(msg, kvPairs...)
+	case telemetry.WarningEvent:
 		lg.Warn(msg, kvPairs...)
-	} else {
+	default:
 		lg.Info(msg, kvPairs...)
 	}
 	telemetry.SendEvent(level, task, msg)
@@ -165,15 +168,12 @@ func checkIdempotency(lg *slog.Logger, seqNum uint, mrSeqNum uint, existingPids 
 		fmt.Sprintf("IsHandlerStillExecuting: Process Name='%s', PIDs=%v, result=True", AppHealthBinaryNameAmd64, existingPids),
 		"pids", existingPids)
 
-	// Check log file freshness to determine if existing process is responsive
-	hEnv, err := getHandlerEnvironment()
-	if err != nil {
-		logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
-			fmt.Sprintf("Failed to get handler environment for idempotency check: %v", err), "error", err)
-		return false
-	}
-
-	logFresh, lastUpdate, logFileErr := isLogFileFresh(hEnv.LogFolder)
+	// Use the log file modification time captured at process startup (before any
+	// logging by this process). This is critical because the shim redirects stdout
+	// to the same log file — any log output from this process would refresh the
+	// mtime and make a stale existing process appear fresh.
+	lastUpdate := logFileLastWriteTimeBeforeStartup
+	logFileErr := logFileLastWriteTimeErr
 
 	// Could not determine log file timestamp (e.g., file not created yet, I/O errors).
 	// Assume responsive to avoid killing a potentially healthy process.
@@ -184,6 +184,9 @@ func checkIdempotency(lg *slog.Logger, seqNum uint, mrSeqNum uint, existingPids 
 			"error", logFileErr, "seqNum", seqNum, "existingPids", existingPids, "currentPid", os.Getpid())
 		return true
 	}
+
+	threshold := time.Duration(AppHealthLogFileStaleThresholdInMinutes) * time.Minute
+	logFresh := time.Since(lastUpdate) < threshold
 
 	if logFresh {
 		logAndSend(lg, telemetry.InfoEvent, telemetry.AppHealthTask,

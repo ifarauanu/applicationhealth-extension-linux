@@ -72,21 +72,15 @@ func findExistingProcessesImpl() ([]int, error) {
 	return pids, nil
 }
 
-// getHandlerLogDir returns the handler log directory from the LOG_DIR
-// environment variable (exported by the shim), falling back to DefaultHandlerLogDir.
+// getHandlerLogDir returns the handler log directory.
+// This must match LOG_DIR in misc/applicationhealth-shim.
 func getHandlerLogDir() string {
-	if dir := os.Getenv("LOG_DIR"); dir != "" {
-		return dir
-	}
 	return DefaultHandlerLogDir
 }
 
-// getHandlerLogFile returns the handler log file name from the LOG_FILE
-// environment variable (exported by the shim), falling back to DefaultHandlerLogFile.
+// getHandlerLogFile returns the handler log file name.
+// This must match LOG_FILE in misc/applicationhealth-shim.
 func getHandlerLogFile() string {
-	if file := os.Getenv("LOG_FILE"); file != "" {
-		return file
-	}
 	return DefaultHandlerLogFile
 }
 

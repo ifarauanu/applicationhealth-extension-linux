@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -66,47 +67,37 @@ func Test_killProcess_AlreadyExited(t *testing.T) {
 }
 
 func Test_getHandlerLogDir(t *testing.T) {
-	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
-		t.Setenv("LOG_DIR", "/custom/log/dir")
-		assert.Equal(t, "/custom/log/dir", getHandlerLogDir())
-	})
-
-	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
-		t.Setenv("LOG_DIR", "")
-		assert.Equal(t, DefaultHandlerLogDir, getHandlerLogDir())
-	})
+	assert.Equal(t, DefaultHandlerLogDir, getHandlerLogDir())
+	assert.Equal(t, "/var/log/azure/applicationhealth-extension", getHandlerLogDir())
 }
 
 func Test_getHandlerLogFile(t *testing.T) {
-	t.Run("ReturnsEnvVarWhenSet", func(t *testing.T) {
-		t.Setenv("LOG_FILE", "custom.log")
-		assert.Equal(t, "custom.log", getHandlerLogFile())
-	})
-
-	t.Run("ReturnsDefaultWhenEnvVarNotSet", func(t *testing.T) {
-		t.Setenv("LOG_FILE", "")
-		assert.Equal(t, DefaultHandlerLogFile, getHandlerLogFile())
-	})
+	assert.Equal(t, DefaultHandlerLogFile, getHandlerLogFile())
+	assert.Equal(t, "handler.log", getHandlerLogFile())
 }
 
 func Test_getLogFileLastWriteTime(t *testing.T) {
 	t.Run("ReturnsModTimeForExistingFile", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		logFile := tmpDir + "/" + DefaultHandlerLogFile
-		require.NoError(t, os.WriteFile(logFile, []byte("test"), 0644))
+		origGetLogFileLastWriteTime := getLogFileLastWriteTime
+		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
 
-		t.Setenv("LOG_DIR", tmpDir)
-		t.Setenv("LOG_FILE", DefaultHandlerLogFile)
+		expectedTime := time.Now().Add(-2 * time.Minute)
+		getLogFileLastWriteTime = func() (time.Time, error) {
+			return expectedTime, nil
+		}
 
 		modTime, err := getLogFileLastWriteTime()
 		assert.NoError(t, err)
-		assert.False(t, modTime.IsZero())
-		assert.WithinDuration(t, time.Now(), modTime, 5*time.Second)
+		assert.Equal(t, expectedTime, modTime)
 	})
 
 	t.Run("ReturnsErrorForMissingFile", func(t *testing.T) {
-		t.Setenv("LOG_DIR", "/nonexistent/path")
-		t.Setenv("LOG_FILE", "handler.log")
+		origGetLogFileLastWriteTime := getLogFileLastWriteTime
+		defer func() { getLogFileLastWriteTime = origGetLogFileLastWriteTime }()
+
+		getLogFileLastWriteTime = func() (time.Time, error) {
+			return time.Time{}, fmt.Errorf("failed to stat handler log file: no such file or directory")
+		}
 
 		_, err := getLogFileLastWriteTime()
 		assert.Error(t, err)

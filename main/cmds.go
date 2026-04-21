@@ -134,7 +134,7 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 	// Save the sequence number before killing old processes, so that if a crash
 	// occurs after killing, the sequence number is already recorded. This allows
 	// the old process to detect the newer sequence in its loop and exit gracefully,
-	// and ensures a retry by the agent starts with the correct sequence state.
+	// and ensures that any fresh app start will have the correct sequence state.
 	if err := seqnoManager.SetSequenceNumber(fullName, "", seqNum); err != nil {
 		return errors.Wrap(err, "failed to save sequence number")
 	}

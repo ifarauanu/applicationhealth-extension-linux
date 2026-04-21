@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -27,16 +26,9 @@ func procExePath(pid int) string {
 	return filepath.Join("/proc", strconv.Itoa(pid), "exe")
 }
 
-// procCmdlinePath returns the path to the /proc/<pid>/cmdline file for the given PID.
-func procCmdlinePath(pid int) string {
-	return filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
-}
-
 // findExistingProcessesImpl scans /proc to find all other running instances of the
-// Application Health Extension binary running with the "enable" argument
-// (excluding the current process).
-// Uses /proc/<pid>/exe for binary identification and /proc/<pid>/cmdline to
-// verify the "enable" argument.
+// Application Health Extension binary (excluding the current process).
+// Uses /proc/<pid>/exe for binary identification.
 // Returns a slice of PIDs of existing processes (empty if none found).
 func findExistingProcessesImpl() ([]int, error) {
 	myPid := os.Getpid()
@@ -63,17 +55,7 @@ func findExistingProcessesImpl() ([]int, error) {
 		}
 
 		procName := filepath.Base(exePath)
-		if procName != AppHealthBinaryNameAmd64 && procName != AppHealthBinaryNameArm64 {
-			continue
-		}
-
-		cmdline, err := os.ReadFile(procCmdlinePath(pid))
-		if err != nil {
-			continue
-		}
-		// /proc/<pid>/cmdline uses null bytes as argument separators
-		parts := strings.Split(string(cmdline), "\x00")
-		if len(parts) >= 2 && parts[1] == "enable" {
+		if procName == AppHealthBinaryNameAmd64 || procName == AppHealthBinaryNameArm64 {
 			pids = append(pids, pid)
 		}
 	}

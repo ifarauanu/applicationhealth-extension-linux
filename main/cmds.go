@@ -131,9 +131,10 @@ func enablePre(lg *slog.Logger, seqNum uint) error {
 		return errors.Errorf("most recent sequence number %d is greater than the requested sequence number %d", mrSeqNum, seqNum)
 	}
 
-	// Save the sequence number before killing old processes. This ensures that
-	// if a crash occurs after killing but before persisting, the sequence number
-	// is already recorded and a subsequent restart can proceed correctly.
+	// Save the sequence number before killing old processes, so that if a crash
+	// occurs after killing, the sequence number is already recorded. This allows
+	// the old process to detect the newer sequence in its loop and exit gracefully,
+	// and ensures a retry by the agent starts with the correct sequence state.
 	if err := seqnoManager.SetSequenceNumber(fullName, "", seqNum); err != nil {
 		return errors.Wrap(err, "failed to save sequence number")
 	}

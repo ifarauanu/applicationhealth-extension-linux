@@ -291,8 +291,7 @@ func enable(lg *slog.Logger, h *handlerenv.HandlerEnvironment, seqNum uint) (str
 		mostRecentSequenceNumberStarted, err := seqnoManager.GetCurrentSequenceNumber(lg, fullName, "")
 		if err != nil {
 			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
-				fmt.Sprintf("Failed to read current sequence number: %v. Continuing with current configuration.", err),
-				"error", err)
+				fmt.Sprintf("Failed to read current sequence number: %v. Continuing with current configuration.", err), "error", err)
 		} else if seqNum < mostRecentSequenceNumberStarted {
 			logAndSend(lg, telemetry.WarningEvent, telemetry.AppHealthTask,
 				fmt.Sprintf("Current sequence number %d is not greater than the most recently started sequence number %d. PID %d initiating graceful shutdown.",

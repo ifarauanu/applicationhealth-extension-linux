@@ -68,12 +68,55 @@ func Test_killProcess_AlreadyExited(t *testing.T) {
 
 func Test_getHandlerLogDir(t *testing.T) {
 	assert.Equal(t, DefaultHandlerLogDir, getHandlerLogDir())
-	assert.Equal(t, "/var/log/azure/applicationhealth-extension", getHandlerLogDir())
 }
 
 func Test_getHandlerLogFile(t *testing.T) {
 	assert.Equal(t, DefaultHandlerLogFile, getHandlerLogFile())
-	assert.Equal(t, "handler.log", getHandlerLogFile())
+}
+
+// Test_shimAndConstantsInSync reads the shim script and verifies that the
+// LOG_DIR and LOG_FILE values match the Go constants. This test will fail
+// if someone changes one side without updating the other.
+func Test_shimAndConstantsInSync(t *testing.T) {
+	shimPath := "../misc/applicationhealth-shim"
+	shimBytes, err := os.ReadFile(shimPath)
+	require.NoError(t, err, "failed to read shim file at %s", shimPath)
+	shimContent := string(shimBytes)
+
+	// Extract LOG_DIR value from: readonly LOG_DIR="..."
+	logDirMatch := extractShimVariable(shimContent, "LOG_DIR")
+	require.NotEmpty(t, logDirMatch, "could not find LOG_DIR in shim")
+	assert.Equal(t, DefaultHandlerLogDir, logDirMatch,
+		"DefaultHandlerLogDir constant does not match LOG_DIR in misc/applicationhealth-shim")
+
+	// Extract LOG_FILE value from: readonly LOG_FILE=...
+	logFileMatch := extractShimVariable(shimContent, "LOG_FILE")
+	require.NotEmpty(t, logFileMatch, "could not find LOG_FILE in shim")
+	assert.Equal(t, DefaultHandlerLogFile, logFileMatch,
+		"DefaultHandlerLogFile constant does not match LOG_FILE in misc/applicationhealth-shim")
+}
+
+// extractShimVariable parses a bash variable assignment from the shim content.
+// Handles both quoted (readonly VAR="value") and unquoted (readonly VAR=value) forms.
+func extractShimVariable(content, varName string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		// Match: readonly VAR="value" or readonly VAR=value
+		for _, prefix := range []string{
+			"readonly " + varName + "=\"",
+			"readonly " + varName + "=",
+			varName + "=\"",
+			varName + "=",
+		} {
+			if strings.HasPrefix(line, prefix) {
+				value := strings.TrimPrefix(line, prefix)
+				value = strings.TrimSuffix(value, "\"")
+				value = strings.TrimSpace(value)
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func Test_getLogFileLastWriteTime(t *testing.T) {

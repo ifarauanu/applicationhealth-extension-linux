@@ -22,10 +22,21 @@ var (
 	killProcesses          = killProcessesImpl
 )
 
+// procExePath returns the path to the /proc/<pid>/exe symlink for the given PID.
+func procExePath(pid int) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "exe")
+}
+
+// procCmdlinePath returns the path to the /proc/<pid>/cmdline file for the given PID.
+func procCmdlinePath(pid int) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
+}
+
 // findExistingProcessesImpl scans /proc to find all other running instances of the
-// Application Health Extension binary (excluding the current process).
-// Uses /proc/<pid>/exe (kernel-controlled symlink to the actual binary) for process
-// identification, which cannot be spoofed unlike /proc/<pid>/cmdline.
+// Application Health Extension binary running with the "enable" argument
+// (excluding the current process).
+// Uses /proc/<pid>/exe for binary identification and /proc/<pid>/cmdline to
+// verify the "enable" argument.
 // Returns a slice of PIDs of existing processes (empty if none found).
 func findExistingProcessesImpl() ([]int, error) {
 	myPid := os.Getpid()
@@ -46,9 +57,7 @@ func findExistingProcessesImpl() ([]int, error) {
 			continue
 		}
 
-		// Use /proc/<pid>/exe symlink to identify the binary — this is set by
-		// the kernel and cannot be modified by the process itself.
-		exePath, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		exePath, err := os.Readlink(procExePath(pid))
 		if err != nil {
 			continue
 		}
@@ -58,11 +67,11 @@ func findExistingProcessesImpl() ([]int, error) {
 			continue
 		}
 
-		// Verify the process is running with "enable" argument via cmdline
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		cmdline, err := os.ReadFile(procCmdlinePath(pid))
 		if err != nil {
 			continue
 		}
+		// /proc/<pid>/cmdline uses null bytes as argument separators
 		parts := strings.Split(string(cmdline), "\x00")
 		if len(parts) >= 2 && parts[1] == "enable" {
 			pids = append(pids, pid)
